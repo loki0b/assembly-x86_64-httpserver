@@ -5,9 +5,11 @@
 .equ IPPROTO_TCP, 0
 .equ INADDR_ANY, 0
 .equ PORT, 80
-.equ SOMAXCONN, 128
+.equ SOMAXCONN, 1#128
 .equ BUFFER_SIZE, 1024
 .equ O_RDONLY, 0
+.equ O_WRONLY, 1
+.equ O_CREAT, 64
 
 # struct sockaddr_in
 .equ SOCKADDR_IN_sin_family, 0
@@ -29,18 +31,22 @@
   .lcomm sockfd_client, 4
   .lcomm client_len, 4
   .lcomm req_buffer, BUFFER_SIZE
+  .lcomm req_size, 4
+  .lcomm method, BUFFER_SIZE
   .lcomm uri, BUFFER_SIZE
-  .lcomm uri_size, 4
+  .lcomm body, 8
+  .lcomm content_length, 4
   .lcomm file, BUFFER_SIZE
+  
 
 .section .text
   .global _start
 
 _start:
   # Creating a socket (TCP)
-  mov rdi, AF_INET
-  mov rsi, SOCK_STREAM
-  mov rdx, IPPROTO_TCP
+  mov edi, AF_INET
+  mov esi, SOCK_STREAM
+  mov edx, IPPROTO_TCP
   mov rax, 41 # socket
   syscall
 
@@ -58,10 +64,10 @@ _start:
   bswap eax # Converting to network endianess (big endian)
   mov dword ptr [sockaddr_in + SOCKADDR_IN_sin_addr + IN_ADDR_s_addr], eax # sockaddr_in.sin_addr.s_addr = '0.0.0.0'
 
-  mov rdi, sockfd  # sockfd
+  mov rdi, sockfd
   lea rsi, sockaddr_in  # &addr
-  mov rdx, SOCKADDR_IN_size  # addrlen
-  mov rax, 49 # bind()
+  mov rdx, SOCKADDR_IN_size
+  mov rax, 49 # bind
   syscall
 
   # Making the host socket a passive socket
@@ -72,24 +78,34 @@ _start:
 
   mov dword ptr [client_len], SOCKADDR_IN_size  # client_len = SOCKADDR_IN_size
 
-
-while:
+parent:
 .accept:
   mov rdi, sockfd # sockfd
-  lea rsi, sockaddr_in_client # addr
-  lea rdx, client_len # addrlen
+  mov rsi, 0#lea rsi, sockaddr_in_client # addr
+  mov rdx, 0#lea rdx, client_len # addrlen
   mov rax, 43 # accept
   syscall
   
   mov dword ptr [sockfd_client], eax
-  
+
+.fork:
   mov rax, 57 # fork
   syscall
 
   cmp rax, 0
-  jne .clear
+  je child
   
-  mov rax, 3 # close host fd
+  # close fd
+  mov rdi, sockfd_client
+  mov rax, 3
+  syscall
+
+  jmp .accept
+
+child:
+  # close host socket
+  mov rdi, sockfd
+  mov rax, 3
   syscall
 
   # Reading client request
@@ -98,53 +114,73 @@ while:
   mov rdx, BUFFER_SIZE # count
   mov rax, 0  # read
   syscall
-  call get_uri
 
-.read_resource:
+  mov  dword ptr [req_size], eax
+
+  call get_method
+  
+  mov rdi, rax
+  inc rdi
+
+  call get_uri
+  cmp rdi, 4
+  je .get
+  jmp .post
+
+.get:
   lea rdi, uri  # path
   mov rsi, O_RDONLY # flags
   mov rax, 2  # open
   syscall
-
-  mov rdi, rax # fd
-  lea rsi, file # buf
-  mov rdx, BUFFER_SIZE # count
-  mov rax, 0 # read
+  
+  mov rdi, rax
+  lea rsi, [file]
+  mov rdx, BUFFER_SIZE
+  mov rax, 0
   syscall
   
-  mov rbx, rax # read return
+  mov rbx, rax
 
-  mov rax, 3
-  syscall
-
-.write_http_message:
   mov rdi, [sockfd_client]  # fd
   lea rsi, msg  # buf
   mov rdx, 19 # count
   mov rax, 1  # write
   syscall
 
-.send_resource:
-  mov rdi, [sockfd_client]  # fd
-  lea rsi, file  # buf
-  mov rdx, rbx # count
-  mov rax, 1  # write
+  mov rdi, [sockfd_client]
+  lea rsi, file
+  mov rdx, rbx
+  mov rax, 1
   syscall
   
-  mov rdi, sockfd_client  # closing fd
+  jmp exit
+
+.post:
+  lea rdi, uri  # path
+  mov rsi, O_WRONLY | O_CREAT # flags
+  mov rdx, 0644 # mode
+  mov rax, 2  # open
+  syscall
+  
+  mov rdi, rax # fd
+  call get_body
+  mov rsi, [body] # buf
+  mov rdx, rax # count
+  mov rax, 1 # write
+  syscall
+  
   mov rax, 3
   syscall
 
-  jmp .exit
-
-.clear:
-  mov rdi, sockfd_client
-  mov rax, 3
+  mov rdi, [sockfd_client]  # fd
+  lea rsi, msg  # buf
+  mov rdx, 19 # count
+  mov rax, 1  # write
   syscall
 
-  jmp .accept
+  jmp exit
 
-.exit:
+exit:
   mov rdi, sockfd_client
   mov rax, 3
   syscall
@@ -153,14 +189,51 @@ while:
   mov rax, 60 # exit
   syscall
 
+get_method:
+  xor rax, rax  # index 0
+.loop_get_method:
+  mov bl, byte ptr [req_buffer + rax]
+  cmp bl, 0x20 # checking the space char
+  je .done_get_method
+
+  mov byte ptr [method + rax], bl
+  inc rax
+  jmp .loop_get_method
+.done_get_method:
+  ret
+
 get_uri:
   xor rax, rax  # index 0
 .loop_get_uri:
-  mov bl, byte ptr [req_buffer + 4 + rax]
+  mov bl, byte ptr [req_buffer + rdi + rax]
+  cmp bl, 0x20 # checking if the value of the new addr is a space
+  je .done_uri
+
   mov byte ptr [uri + rax], bl # copying the nth byte of req_buffer to uri
   inc rax
-  mov bl, byte ptr [req_buffer + 4 + rax]
-  cmp bl, 0x20 # checking if the value of the new addr is a space
-  jne .loop_get_uri
-.done:
+  jmp .loop_get_uri
+.done_uri:
   ret
+
+get_body:
+  mov rax, req_size
+  dec rax
+.find:
+  mov bl, byte ptr [req_buffer + rax]
+  cmp bl, 0x0a
+  jne .dec
+.done_get_body:
+  inc rax
+  mov rbx, rax
+
+  lea rax, [req_buffer + rax]
+  mov [body], rax
+
+  mov rax, req_size
+  sub rax, rbx
+
+  ret
+.dec:
+  dec rax
+  jmp .find
+ 
