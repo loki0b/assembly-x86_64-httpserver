@@ -4,8 +4,8 @@
 .equ SOCK_STREAM, 1
 .equ IPPROTO_TCP, 0
 .equ INADDR_ANY, 0
-.equ PORT, 80
-.equ SOMAXCONN, 1#128
+.equ PORT, 8080
+.equ SOMAXCONN, 128
 .equ BUFFER_SIZE, 1024
 .equ O_RDONLY, 0
 .equ O_WRONLY, 1
@@ -81,8 +81,8 @@ _start:
 parent:
 .accept:
   mov rdi, sockfd # sockfd
-  mov rsi, 0#lea rsi, sockaddr_in_client # addr
-  mov rdx, 0#lea rdx, client_len # addrlen
+  lea rsi, sockaddr_in_client # addr
+  lea rdx, client_len # addrlen
   mov rax, 43 # accept
   syscall
   
