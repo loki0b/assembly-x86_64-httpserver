@@ -3,10 +3,11 @@
 .equ AF_INET, 2
 .equ SOCK_STREAM, 1
 .equ IPPROTO_TCP, 0
-.equ INADDR_ANY, 0x00000000
+.equ INADDR_ANY, 0
 .equ PORT, 80
 .equ SOMAXCONN, 128
 .equ BUFFER_SIZE, 1024
+.equ O_RDONLY, 0
 
 # struct sockaddr_in
 .equ SOCKADDR_IN_sin_family, 0
@@ -27,7 +28,10 @@
   .lcomm sockfd, 4
   .lcomm sockfd_client, 4
   .lcomm client_len, 4
-  .lcomm buffer, BUFFER_SIZE
+  .lcomm req_buffer, BUFFER_SIZE
+  .lcomm uri, BUFFER_SIZE
+  .lcomm uri_size, 4
+  .lcomm file, BUFFER_SIZE
 
 .section .text
   .global _start
@@ -37,12 +41,12 @@ _start:
   mov rdi, AF_INET
   mov rsi, SOCK_STREAM
   mov rdx, IPPROTO_TCP
-  mov rax, 41 # socket()
+  mov rax, 41 # socket
   syscall
 
-  mov dword ptr [sockfd], eax
+  mov dword ptr [sockfd], eax # saving the host socket
 
-  # Bind
+  # Binding host socket to an address
   mov ax, AF_INET
   mov word ptr [sockaddr_in + SOCKADDR_IN_sin_family], ax # sockaddr_in.sin_family = AF_INET
 
@@ -60,15 +64,17 @@ _start:
   mov rax, 49 # bind()
   syscall
 
-  # int listen(int sockfd, int backlog)
-  mov rdi, sockfd # sockfd
-  mov rsi, SOMAXCONN  # backlog
+  # Making the host socket a passive socket
+  mov rdi, sockfd # host socket
+  mov rsi, SOMAXCONN  # max connections
   mov rax, 50 # listen
   syscall
 
-  # int accept(int sockfd, struct sockaddr *_Nullable restrict addr, socklen_t *_Nullable restrict addrlen)
   mov dword ptr [client_len], SOCKADDR_IN_size  # client_len = SOCKADDR_IN_size
 
+
+while:
+.accept:
   mov rdi, sockfd # sockfd
   lea rsi, sockaddr_in_client # addr
   lea rdx, client_len # addrlen
@@ -76,27 +82,85 @@ _start:
   syscall
   
   mov dword ptr [sockfd_client], eax
-
-  # ssize_t read(size_t count; int fd, void buf[count], size_t count);
-  mov rdi, sockfd_client  # fd
-  lea rsi, buffer # buf
-  mov rdx, BUFFER_SIZE
-  mov rax, 0  # read
+  
+  mov rax, 57 # fork
   syscall
 
-  # ssize_t write(size_t count; int fd, const void buf[count], size_t count);
+  cmp rax, 0
+  jne .clear
+  
+  mov rax, 3 # close host fd
+  syscall
+
+  # Reading client request
+  mov rdi, sockfd_client  # fd
+  lea rsi, req_buffer # buf
+  mov rdx, BUFFER_SIZE # count
+  mov rax, 0  # read
+  syscall
+  call get_uri
+
+.read_resource:
+  lea rdi, uri  # path
+  mov rsi, O_RDONLY # flags
+  mov rax, 2  # open
+  syscall
+
+  mov rdi, rax # fd
+  lea rsi, file # buf
+  mov rdx, BUFFER_SIZE # count
+  mov rax, 0 # read
+  syscall
+  
+  mov rbx, rax # read return
+
+  mov rax, 3
+  syscall
+
+.write_http_message:
   mov rdi, [sockfd_client]  # fd
   lea rsi, msg  # buf
-  mov rdx, 20 # count
+  mov rdx, 19 # count
+  mov rax, 1  # write
+  syscall
+
+.send_resource:
+  mov rdi, [sockfd_client]  # fd
+  lea rsi, file  # buf
+  mov rdx, rbx # count
   mov rax, 1  # write
   syscall
   
-  # int close(int fd)
-  mov rdi, sockfd_client  # fd
-  mov rax, 3  # close
+  mov rdi, sockfd_client  # closing fd
+  mov rax, 3
   syscall
 
-  # Exiting program
+  jmp .exit
+
+.clear:
+  mov rdi, sockfd_client
+  mov rax, 3
+  syscall
+
+  jmp .accept
+
+.exit:
+  mov rdi, sockfd_client
+  mov rax, 3
+  syscall
+
   mov rdi, 0  # status
   mov rax, 60 # exit
   syscall
+
+get_uri:
+  xor rax, rax  # index 0
+.loop_get_uri:
+  mov bl, byte ptr [req_buffer + 4 + rax]
+  mov byte ptr [uri + rax], bl # copying the nth byte of req_buffer to uri
+  inc rax
+  mov bl, byte ptr [req_buffer + 4 + rax]
+  cmp bl, 0x20 # checking if the value of the new addr is a space
+  jne .loop_get_uri
+.done:
+  ret
